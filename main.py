@@ -10,7 +10,7 @@ import os
 import time
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, TypedDict, Sequence
 from datetime import datetime, timezone, timedelta
 
 # Google API imports
@@ -18,6 +18,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.auth.transport.requests import Request
 
 # === Configuration ===
 SCOPES = [
@@ -27,12 +28,12 @@ SCOPES = [
 
 # Edit these
 # <-- put the ID for your Google Sheet
-SPREADSHEET_ID = "PUT_YOUR_SPREADSHEET_ID_HERE"
-SHEET_NAME = "Sheet1"  # sheet/tab name
-LOOKBACK_MINUTES = 60
-MAX_MESSAGES_FETCH = 500  # safety cap
-CREDENTIALS_FILE = "credentials.json"
-TOKEN_FILE = "token.json"
+SPREADSHEET_ID: str = "PUT_YOUR_SPREADSHEET_ID_HERE"
+SHEET_NAME: str = "Sheet1"  # sheet/tab name
+LOOKBACK_MINUTES: int = 60
+MAX_MESSAGES_FETCH: int = 500  # safety cap
+CREDENTIALS_FILE: str = "credentials.json"
+TOKEN_FILE: str = "token.json"
 
 # Logging
 logging.basicConfig(level=logging.INFO,
@@ -40,8 +41,8 @@ logging.basicConfig(level=logging.INFO,
 
 
 # === Authentication / service creation ===
-def get_creds():
-    creds = None
+def get_creds() -> Credentials:
+    creds: Optional[Credentials] = None
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if not creds or not creds.valid:
@@ -58,7 +59,17 @@ def get_creds():
 
 
 # === Sheets ===
-def read_rules_from_sheet(sheets_service) -> List[Dict[str, Any]]:
+class Rule(TypedDict, total=False):
+    name: str
+    from_matcher: str
+    to_matcher: str
+    subject_matcher: str
+    body_matcher: str
+    has_attachment: bool
+    verdict: str
+
+
+def read_rules_from_sheet(sheets_service: Any) -> List[Rule]:
     # We expect header row; read all values
     range_name = f"{SHEET_NAME}"
     sheet = sheets_service.spreadsheets()
@@ -70,7 +81,7 @@ def read_rules_from_sheet(sheets_service) -> List[Dict[str, Any]]:
 
     headers = [h.strip() for h in values[0]]
     rows = values[1:]
-    rules = []
+    rules: List[Rule] = []
     for row in rows:
         # Map header -> value (safe access)
         row_map = {headers[i]: (row[i].strip() if i < len(row) else "")
@@ -81,12 +92,12 @@ def read_rules_from_sheet(sheets_service) -> List[Dict[str, Any]]:
         if not enabled:
             continue
         # Normalize fields
-        rule = {
+        rule: Rule = {
             "name": row_map.get("name", ""),
-            "from_contains": row_map.get("from_contains", ""),
-            "to_contains": row_map.get("to_contains", ""),
-            "subject_contains": row_map.get("subject_contains", ""),
-            "body_contains": row_map.get("body_contains", ""),
+            "from_matcher": row_map.get("from_matcher", ""),
+            "to_matcher": row_map.get("to_matcher", ""),
+            "subject_matcher": row_map.get("subject_matcher", ""),
+            "body_matcher": row_map.get("body_matcher", ""),
             "has_attachment": row_map.get("has_attachment", "").lower() in ("true", "1", "yes", "y", "t"),
             "verdict": row_map.get("verdict", ""),
         }
@@ -96,11 +107,11 @@ def read_rules_from_sheet(sheets_service) -> List[Dict[str, Any]]:
 
 
 # === Gmail helpers ===
-def build_gmail_service(creds):
+def build_gmail_service(creds: Credentials):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def ensure_label_id(gmail_service, label_name: str) -> str:
+def ensure_label_id(gmail_service: Any, label_name: str) -> str:
     """Return label id for label_name; create it if missing."""
     user_id = "me"
     labels = gmail_service.users().labels().list(
@@ -117,7 +128,19 @@ def ensure_label_id(gmail_service, label_name: str) -> str:
     return created["id"]
 
 
-def get_recent_message_ids(gmail_service, lookback_minutes=60, cap=500) -> List[Dict[str, Any]]:
+class GmailHeader(TypedDict):
+    name: str
+    value: str
+
+
+class GmailMessage(TypedDict, total=False):
+    id: str
+    internalDate: str
+    snippet: str
+    payload: Dict[str, Any]
+
+
+def get_recent_message_ids(gmail_service: Any, lookback_minutes: int = 60, cap: int = 500) -> List[GmailMessage]:
     """
     Get messages that arrived within lookback_minutes.
     Strategy: ask Gmail for a recent timeframe (e.g. newer_than:1d) to limit,
@@ -133,9 +156,9 @@ def get_recent_message_ids(gmail_service, lookback_minutes=60, cap=500) -> List[
         logging.exception("Gmail list error: %s", e)
         return []
 
-    messages = res.get("messages", []) or []
+    messages: List[Dict[str, str]] = res.get("messages", []) or []
     # Now fetch message metadata and filter by internalDate
-    recent = []
+    recent: List[GmailMessage] = []
     threshold_ms = int((datetime.now(timezone.utc) -
                        timedelta(minutes=lookback_minutes)).timestamp() * 1000)
     for m in messages:
@@ -156,7 +179,7 @@ def get_recent_message_ids(gmail_service, lookback_minutes=60, cap=500) -> List[
     return recent
 
 
-def header_value(headers: List[Dict[str, str]], name: str) -> str:
+def header_value(headers: Sequence[GmailHeader], name: str) -> str:
     name = name.lower()
     for h in headers:
         if h.get("name", "").lower() == name:
@@ -164,25 +187,25 @@ def header_value(headers: List[Dict[str, str]], name: str) -> str:
     return ""
 
 
-def message_matches_rule(message: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+def message_matches_rule(message: GmailMessage, rule: Rule) -> bool:
     """Check all non-empty fields of rule (AND semantics)."""
-    headers = message.get("payload", {}).get("headers", [])
+    headers: List[GmailHeader] = message.get("payload", {}).get(
+        "headers", [])  # type: ignore[assignment]
     from_v = header_value(headers, "From")
     to_v = header_value(headers, "To")
     subject_v = header_value(headers, "Subject")
     snippet = message.get("snippet", "")
 
-    def contains(hay, needle):
+    def contains(hay: str, needle: str) -> bool:
         return needle.strip().lower() in (hay or "").lower()
 
-    # from
-    if rule["from_contains"] and not contains(from_v, rule["from_contains"]):
+    if rule["from_matcher"] and not contains(from_v, rule["from_matcher"]):
         return False
-    if rule["to_contains"] and not contains(to_v, rule["to_contains"]):
+    if rule["to_matcher"] and not contains(to_v, rule["to_matcher"]):
         return False
-    if rule["subject_contains"] and not contains(subject_v, rule["subject_contains"]):
+    if rule["subject_matcher"] and not contains(subject_v, rule["subject_matcher"]):
         return False
-    if rule["body_contains"] and not contains(snippet, rule["body_contains"]):
+    if rule["body_matcher"] and not contains(snippet, rule["body_matcher"]):
         return False
     if rule["has_attachment"]:
         # quick heuristic: check payload.parts for filename or attachmentId
@@ -202,13 +225,14 @@ def message_matches_rule(message: Dict[str, Any], rule: Dict[str, Any]) -> bool:
     return True
 
 
-def apply_verdicts(gmail_service, message_ids: List[str], verdicts: List[str]):
+def apply_verdicts(gmail_service: Any, message_ids: List[str], verdicts: List[str]) -> None:
     """Apply verdict operations to messages (batch where possible)."""
     user_id = "me"
-    add_label_ids = []
-    remove_label_ids = []
+    add_label_ids: List[str] = []
+    remove_label_ids: List[str] = []
     # We'll collect batch operations per label:
-    create_label_ids = {}  # labelname -> id
+    # labelname -> id (reserved for future use)
+    create_label_ids: Dict[str, str] = {}
 
     # Parse verdicts (e.g., mark_read;add_label:Junk)
     for v in verdicts:
@@ -258,7 +282,7 @@ def apply_verdicts(gmail_service, message_ids: List[str], verdicts: List[str]):
             logging.exception("Error applying verdict to messages: %s", e)
 
 
-def main():
+def main() -> None:
     creds = get_creds()
     sheets_service = build(
         "sheets", "v4", credentials=creds, cache_discovery=False)
@@ -275,7 +299,7 @@ def main():
     # For each rule, collect matched message IDs and apply verdicts
     # We'll do per-rule application (could be merged for performance)
     for rule in rules:
-        matched_ids = []
+        matched_ids: List[str] = []
         for msg in recent_messages:
             try:
                 if message_matches_rule(msg, rule):

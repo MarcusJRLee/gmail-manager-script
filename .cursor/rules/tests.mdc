@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+- All test files should be named FILE_NAME_test.EXTENSION
