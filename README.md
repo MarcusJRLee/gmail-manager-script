@@ -4,4 +4,14 @@ This script runs periodically (e.g. every 20 minutes) to manage your incoming em
 
 ## Setup instructions
 
-TODO
+### Install requirements
+
+MacOS: `source venv/bin/activate`
+Windows (Command Prompt): `venv\Scripts\activate.bat`
+Windows (PowerShell): `venv\Scripts\Activate.ps1`
+
+Install the requirements:
+`pip install -r requirements.txt`
+
+Deactivate when done:
+`deactivate`
