@@ -13,6 +13,7 @@ import logging
 from typing import List, Dict, Any, Optional, TypedDict, Sequence
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -31,7 +32,7 @@ SCOPES = [
 # Edit these (non-secret defaults). Put secrets in config.private.json
 DEFAULT_SPREADSHEET_ID: str = "SHEET_ID"
 DEFAULT_SHEET_NAME: str = "SHEET_NAME"
-LOOKBACK_MINUTES: int = 60
+LOOKBACK_MINUTES: int = 60 * 2
 MAX_MESSAGES_FETCH: int = 500  # safety cap
 CREDENTIALS_FILE: str = "credentials.json"
 TOKEN_FILE: str = "token.json"
@@ -165,21 +166,57 @@ def build_gmail_service(creds: Credentials) -> Any:
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
+_LABEL_NAME_TO_ID_CACHE: Dict[str, str] = {}
+_LABEL_CACHE_LOCK = threading.Lock()
+
+
+def _init_label_cache_if_needed(gmail_service: Any) -> None:
+    """Populate the global label cache once per process."""
+    # Fast-path without lock
+    if _LABEL_NAME_TO_ID_CACHE:
+        return
+    with _LABEL_CACHE_LOCK:
+        if _LABEL_NAME_TO_ID_CACHE:
+            return
+        user_id = "me"
+        labels = gmail_service.users().labels().list(
+            userId=user_id).execute().get("labels", [])
+        for l in labels:
+            name = l.get("name", "")
+            lid = l.get("id", "")
+            if not name or not lid:
+                continue
+            # Cache both exact and lowercase for case-insensitive lookup
+            _LABEL_NAME_TO_ID_CACHE.setdefault(name, lid)
+            _LABEL_NAME_TO_ID_CACHE.setdefault(name.lower(), lid)
+
+
+def _get_label_id_from_cache(gmail_service: Any, label_name: str) -> Optional[str]:
+    _init_label_cache_if_needed(gmail_service)
+    lid = _LABEL_NAME_TO_ID_CACHE.get(label_name)
+    if lid:
+        return lid
+    return _LABEL_NAME_TO_ID_CACHE.get(label_name.lower())
+
+
 def ensure_label_id(gmail_service: Any, label_name: str) -> str:
-    """Return label id for label_name; create it if missing."""
+    """Return label id for label_name; create it if missing. Uses cache."""
+    existing = _get_label_id_from_cache(gmail_service, label_name)
+    if existing:
+        return existing
+    # create if not found
     user_id = "me"
-    labels = gmail_service.users().labels().list(
-        userId=user_id).execute().get("labels", [])
-    for l in labels:
-        if l.get("name", "").lower() == label_name.lower():
-            return l["id"]
-    # create
     body = {"name": label_name, "labelListVisibility": "labelShow",
             "messageListVisibility": "show"}
     created = gmail_service.users().labels().create(
         userId=user_id, body=body).execute()
-    logging.info("Created label %s -> %s", label_name, created["id"])
-    return created["id"]
+    created_id = created.get("id", "")
+    if created_id:
+        with _LABEL_CACHE_LOCK:
+            _LABEL_NAME_TO_ID_CACHE.setdefault(label_name, created_id)
+            _LABEL_NAME_TO_ID_CACHE.setdefault(label_name.lower(), created_id)
+    logging.info("Created label %s -> %s", label_name, created_id)
+    return created_id
 
 
 class GmailHeader(TypedDict):
@@ -203,7 +240,7 @@ def get_recent_message_ids(gmail_service: Any, lookback_minutes: int = 60, cap: 
     user_id = "me"
     start_timestamp = int((datetime.now(timezone.utc) -
                           timedelta(minutes=lookback_minutes)).timestamp())
-    query = f"after:{start_timestamp}"
+    query = f"label:inbox after:{start_timestamp}"
     try:
         res = gmail_service.users().messages().list(
             userId=user_id, q=query, maxResults=min(cap, 500)).execute()
@@ -229,7 +266,7 @@ def get_recent_message_ids(gmail_service: Any, lookback_minutes: int = 60, cap: 
         # safety cap
         if len(recent) >= cap:
             break
-    logging.info("Found %d messages in last %d minutes",
+    logging.info("Found %d messages in your inbox from the last %d minutes",
                  len(recent), lookback_minutes)
     return recent
 
@@ -280,7 +317,11 @@ def message_matches_rule(message: GmailMessage, rule: Rule) -> bool:
     return True
 
 
-def apply_verdicts(gmail_service: Any, message_ids: List[str], verdicts: List[str]) -> None:
+def apply_verdicts(
+        gmail_service: Any,
+        message_ids: List[str],
+        verdicts: List[str]
+) -> None:
     """Apply verdict operations to messages (batch where possible)."""
     user_id = "me"
     add_label_ids: List[str] = []
@@ -303,13 +344,10 @@ def apply_verdicts(gmail_service: Any, message_ids: List[str], verdicts: List[st
         elif v.startswith("remove_label:"):
             label_name = v.split(":", 1)[1].strip()
             if label_name:
-                # find label id
-                labels = gmail_service.users().labels().list(
-                    userId=user_id).execute().get("labels", [])
-                for l in labels:
-                    if l.get("name", "").lower() == label_name.lower():
-                        remove_label_ids.append(l["id"])
-                        break
+                # Use cache to resolve label id without extra API calls
+                lid = _get_label_id_from_cache(gmail_service, label_name)
+                if lid:
+                    remove_label_ids.append(lid)
         else:
             logging.warning("Unknown verdict token: %s", v)
 
@@ -439,34 +477,26 @@ def compute_rule_to_matched_ids(
     return out
 
 
-def apply_verdicts_in_parallel(
+def apply_all_verdicts(
     gmail_service: Any,
     rules: List[Rule],
     rule_to_matched_ids: Dict[int, List[str]],
-    workers: int,
 ) -> None:
-    def apply_for_rule(idx_and_matched_ids) -> None:
-        rule_idx, matched_ids = idx_and_matched_ids
-        if not matched_ids:
+    for rule_idx, matched_msg_ids in rule_to_matched_ids.items():
+        if not matched_msg_ids:
             # No messages matched for this rule, skip
-            return
+            continue
         if rule_idx < 0 or rule_idx >= len(rules):
             logging.warning("Rule index %d out of range", rule_idx)
-            return
+            continue
         rule = rules[rule_idx]
         verdict_tokens = [v.strip() for v in rule.get(
             "verdict", "").split(";") if v.strip()]
         logging.info(
             "Rule '%s' matched %d messages; verdict=%s",
-            rule.get("from_matcher"), len(matched_ids), verdict_tokens
+            rule.get("from_matcher"), len(matched_msg_ids), verdict_tokens
         )
-        apply_verdicts(gmail_service, matched_ids, verdict_tokens)
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(apply_for_rule, item)
-                   for item in rule_to_matched_ids.items()]
-        for fut in futures:
-            fut.result()  # Propagate exceptions if any
+        apply_verdicts(gmail_service, matched_msg_ids, verdict_tokens)
 
 # === Main =====================================================================
 
@@ -487,15 +517,14 @@ def main() -> None:
 
     # Build rule -> matched ids mapping in parallel for speed
     workers = compute_ideal_num_workers(len(recent_messages))
-    logging.info("Num workers: %d", workers)
+    logging.info("Using %d workers", workers)
     rule_to_matched_ids = compute_rule_to_matched_ids(
         recent_messages, rules, workers
     )
 
     # Apply verdicts for each rule in parallel
-    workers = compute_ideal_num_workers(len(rules))
-    apply_verdicts_in_parallel(
-        gmail_service, rules, rule_to_matched_ids, workers)
+    apply_all_verdicts(
+        gmail_service, rules, rule_to_matched_ids)
 
 
 if __name__ == "__main__":

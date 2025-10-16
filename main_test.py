@@ -399,6 +399,78 @@ def test_apply_verdicts_uses_label_cache(monkeypatch: pytest.MonkeyPatch):
     assert calls["create_calls"] == 1
 
 
+def test_remove_label_uses_cached_ids(monkeypatch: pytest.MonkeyPatch):
+    # Ensure cache is empty for test isolation
+    if hasattr(m, "_LABEL_NAME_TO_ID_CACHE"):
+        delattr(m, "_LABEL_NAME_TO_ID_CACHE")
+
+    calls: Dict[str, int] = {"list_calls": 0}
+
+    class Labels:
+        def list(self, userId: str):  # type: ignore[override]
+            class Exec:
+                def execute(_self):
+                    calls["list_calls"] += 1
+                    # Provide label Old in first and only listing to seed cache
+                    return {"labels": [{"name": "Old", "id": "OLD_ID"}]}
+
+            return Exec()
+
+        # type: ignore[override]
+        def create(self, userId: str, body: Dict[str, str]):
+            class Exec:
+                def execute(_self):
+                    # Not used in this test
+                    return {"id": "IGNORED"}
+
+            return Exec()
+
+    class Messages:
+        # type: ignore[override]
+        def batchModify(self, userId: str, body: Dict[str, Any]):
+            class Exec:
+                def execute(self):
+                    return {}
+
+            return Exec()
+
+    class Users:
+        def __init__(self):
+            self._labels = Labels()
+            self._messages = Messages()
+
+        def labels(self):
+            return self._labels
+
+        def messages(self):
+            return self._messages
+
+    class Gmail:
+        def __init__(self):
+            self._users = Users()
+
+        def users(self):
+            return self._users
+
+    gmail = Gmail()
+
+    # First call seeds cache via list
+    m.apply_verdicts(
+        gmail,  # type: ignore[arg-type]
+        ["m1"],
+        ["remove_label:Old"],
+    )
+    assert calls["list_calls"] == 1
+
+    # Second call should use cached id without listing again
+    m.apply_verdicts(
+        gmail,  # type: ignore[arg-type]
+        ["m2"],
+        ["remove_label:Old"],
+    )
+    assert calls["list_calls"] == 1
+
+
 def test_compute_apply_workers_env_and_default(monkeypatch: pytest.MonkeyPatch):
     # Access the inner function by running main() path setup; we'll re-import
     # compute via attribute inspection using the function from module scope.
