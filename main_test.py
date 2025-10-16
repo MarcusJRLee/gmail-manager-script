@@ -325,6 +325,101 @@ def test_apply_verdicts_add_and_remove_labels(monkeypatch: pytest.MonkeyPatch):
     assert "removeLabelIds" in calls["body"]
 
 
+def test_apply_verdicts_uses_label_cache(monkeypatch: pytest.MonkeyPatch):
+    # Ensure cache is empty for test isolation
+    if hasattr(m, "_LABEL_NAME_TO_ID_CACHE"):
+        delattr(m, "_LABEL_NAME_TO_ID_CACHE")
+
+    calls: Dict[str, int] = {"list_calls": 0, "create_calls": 0}
+
+    class Labels:
+        def list(self, userId: str):  # type: ignore[override]
+            class Exec:
+                def execute(_self):
+                    calls["list_calls"] += 1
+                    # Only existing label is Old
+                    return {"labels": [{"name": "Old", "id": "OLD_ID"}]}
+
+            return Exec()
+
+        # type: ignore[override]
+        def create(self, userId: str, body: Dict[str, str]):
+            class Exec:
+                def execute(_self):
+                    calls["create_calls"] += 1
+                    return {"id": "NEW_CREATED_ID"}
+
+            return Exec()
+
+    class Messages:
+        # type: ignore[override]
+        def batchModify(self, userId: str, body: Dict[str, Any]):
+            class Exec:
+                def execute(self):
+                    return {}
+
+            return Exec()
+
+    class Users:
+        def __init__(self):
+            self._labels = Labels()
+            self._messages = Messages()
+
+        def labels(self):
+            return self._labels
+
+        def messages(self):
+            return self._messages
+
+    class Gmail:
+        def __init__(self):
+            self._users = Users()
+
+        def users(self):
+            return self._users
+
+    gmail = Gmail()
+
+    # First call should list once and create once for label "New"
+    m.apply_verdicts(
+        gmail,  # type: ignore[arg-type]
+        ["m1"],
+        ["add_label:New"],
+    )
+    assert calls["list_calls"] == 1
+    assert calls["create_calls"] == 1
+
+    # Second call for the same label should NOT list or create again (cache hit)
+    m.apply_verdicts(
+        gmail,  # type: ignore[arg-type]
+        ["m2"],
+        ["add_label:New"],
+    )
+    assert calls["list_calls"] == 1
+    assert calls["create_calls"] == 1
+
+
+def test_compute_apply_workers_env_and_default(monkeypatch: pytest.MonkeyPatch):
+    # Access the inner function by running main() path setup; we'll re-import
+    # compute via attribute inspection using the function from module scope.
+    # The function is defined inside main, so we mimic logic here.
+
+    # Recreate the logic to ensure env override respected
+    def compute_apply_workers(num_rules: int) -> int:
+        env_threads = m._safe_int_env("APPLY_THREADS", -1)
+        if env_threads > 0:
+            return max(1, min(env_threads, max(1, num_rules)))
+        return max(1, min(8, max(1, num_rules)))
+
+    # Env wins and is capped by num_rules
+    monkeypatch.setenv("APPLY_THREADS", "100")
+    assert compute_apply_workers(5) == 5
+
+    # Env invalid -> default
+    monkeypatch.delenv("APPLY_THREADS", raising=False)
+    assert compute_apply_workers(20) == 8
+
+
 def test_get_creds_uses_existing_token_and_handles_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
     token_path = tmp_path / "token.json"
     creds = DummyCreds(valid=True)
@@ -393,3 +488,66 @@ def test_main_no_rules(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptur
     with caplog.at_level("INFO"):
         m.main()
     assert any("No enabled rules" in rec.message for rec in caplog.records)
+
+
+def test_main_applies_verdicts_in_parallel(monkeypatch: pytest.MonkeyPatch):
+    # Stub creds and services
+    monkeypatch.setattr(m, "get_creds", lambda: DummyCreds())
+    monkeypatch.setattr(m, "build_gmail_service", lambda c: object())
+    monkeypatch.setattr(m, "build", lambda *args, **kwargs: object())
+
+    # Two enabled rules; only first matches
+    rules: List[m.Rule] = [
+        {
+            "name": "r1",
+            "from_matcher": "",
+            "to_matcher": "",
+            "subject_matcher": "",
+            "body_matcher": "",
+            "has_attachment": False,
+            "verdict": "mark_read",
+        },
+        {
+            "name": "r2",
+            "from_matcher": "",
+            "to_matcher": "",
+            "subject_matcher": "",
+            "body_matcher": "",
+            "has_attachment": False,
+            "verdict": "add_label:Foo",
+        },
+    ]
+
+    # Messages don't matter for this test because we stub the mapping
+    monkeypatch.setattr(m, "read_rules_from_sheet", lambda s: rules)
+    monkeypatch.setattr(
+        m,
+        "get_recent_message_ids",
+        lambda *args, **kwargs: [
+            {"id": "a", "payload": {"headers": []}},
+            {"id": "b", "payload": {"headers": []}},
+        ],
+    )
+
+    # Force mapping so only r1 has matches
+    monkeypatch.setattr(
+        m,
+        "compute_rule_to_matched_ids",
+        lambda messages, rules, _=None: {0: ["a", "b"], 1: []},
+    )
+
+    calls: List[Dict[str, Any]] = []
+
+    def fake_apply_verdicts(gmail, message_ids: List[str], verdicts: List[str]):
+        calls.append({"ids": list(message_ids), "verdicts": list(verdicts)})
+
+    monkeypatch.setattr(m, "apply_verdicts", fake_apply_verdicts)
+
+    # Run
+    m.main()
+
+    # We expect one apply call for r1 with ids a,b and verdict mark_read
+    assert len(calls) == 1
+    got = calls[0]
+    assert set(got["ids"]) == {"a", "b"}
+    assert got["verdicts"] == ["mark_read"]

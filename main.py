@@ -12,6 +12,7 @@ import json
 import logging
 from typing import List, Dict, Any, Optional, TypedDict, Sequence
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -160,7 +161,7 @@ def read_rules_from_sheet(sheets_service: Any) -> List[Rule]:
 
 # === Gmail helpers ============================================================
 
-def build_gmail_service(creds: Credentials):
+def build_gmail_service(creds: Credentials) -> Any:
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
@@ -200,8 +201,9 @@ def get_recent_message_ids(gmail_service: Any, lookback_minutes: int = 60, cap: 
     then filter by internalDate in code to precise minute granularity.
     """
     user_id = "me"
-    # We ask for messages newer than 1 day to constrain results, then filter to lookback_minutes
-    query = "newer_than:1d"
+    start_timestamp = int((datetime.now(timezone.utc) -
+                          timedelta(minutes=lookback_minutes)).timestamp())
+    query = f"after:{start_timestamp}"
     try:
         res = gmail_service.users().messages().list(
             userId=user_id, q=query, maxResults=min(cap, 500)).execute()
@@ -334,6 +336,138 @@ def apply_verdicts(gmail_service: Any, message_ids: List[str], verdicts: List[st
         except HttpError as e:
             logging.exception("Error applying verdict to messages: %s", e)
 
+
+def get_message_subject(message: GmailMessage) -> str:
+    subject = ""
+    try:
+        payload = message.get("payload", {})
+        headers = payload.get("headers", [])
+        for h in headers:
+            if h.get("name", "").lower() == "subject":
+                subject = h.get("value", "")
+                break
+    except Exception:
+        subject = ""
+
+# === Matching in parallel ======================================================
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    try:
+        v = int(os.getenv(name, str(default)))
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+def compute_ideal_num_workers(task_len: int) -> int:
+    """Derive a sensible default thread count.
+
+    Priority:
+    - MATCH_THREADS env var if set and valid (>0)
+    - Else base on CPU cores, scaled for I/O-bound work
+    - Always cap by number of messages and an upper bound to avoid overload
+    """
+    # Env override
+    env_threads = _safe_int_env("MATCH_THREADS", -1)
+    if env_threads > 0:
+        return max(1, min(env_threads, max(1, task_len)))
+
+    # Compute from cpu count (I/O bound: allow a multiple)
+    try:
+        cores = os.cpu_count() or 1
+    except Exception:
+        cores = 1
+
+    # Heuristic: 4x cores for network-bound matching, but not excessive
+    heuristic = max(1, cores * 4)
+
+    # Upper safety cap to avoid creating too many threads
+    SAFETY_CAP = 64
+
+    return max(1, min(heuristic, SAFETY_CAP, max(1, task_len)))
+
+
+def compute_rule_to_matched_ids(
+    messages: List[GmailMessage],
+    rules: List[Rule],
+    workers: int,
+) -> Dict[int, List[str]]:
+    """Build mapping of rule index -> matched message ids using a thread pool.
+
+    We parallelize over messages to avoid concurrent writes to the same list.
+    Each worker computes matches for a single message and returns the indices
+    of matching rules, which we aggregate on the main thread.
+    """
+    if not messages or not rules:
+        return {i: [] for i in range(len(rules))}
+
+    def eval_one(msg: GmailMessage) -> List[int]:
+        matched: List[int] = []
+        subject = get_message_subject(msg)
+        logging.info("Handling message id=%s subject=%r",
+                     msg.get("id"), subject)
+        for idx, rule in enumerate(rules):
+            try:
+                if message_matches_rule(msg, rule):
+                    matched.append(idx)
+            except Exception:
+                logging.exception(
+                    "Error checking message against rule %s", rule.get("name")
+                )
+        return matched
+
+    out: Dict[int, List[str]] = {i: [] for i in range(len(rules))}
+
+    # Use a bounded thread pool
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_msg = {executor.submit(
+            eval_one, msg): msg for msg in messages}
+        for fut in as_completed(future_to_msg):
+            msg = future_to_msg[fut]
+            try:
+                matched_rule_idxs = fut.result()
+            except Exception:
+                logging.exception("Worker failed for message %s", msg.get("id"))
+                continue
+            msg_id = msg.get("id") or ""
+            if not msg_id:
+                continue
+            for rule_idx in matched_rule_idxs:
+                out[rule_idx].append(msg_id)
+
+    return out
+
+
+def apply_verdicts_in_parallel(
+    gmail_service: Any,
+    rules: List[Rule],
+    rule_to_matched_ids: Dict[int, List[str]],
+    workers: int,
+) -> None:
+    def apply_for_rule(idx_and_matched_ids) -> None:
+        rule_idx, matched_ids = idx_and_matched_ids
+        if not matched_ids:
+            # No messages matched for this rule, skip
+            return
+        if rule_idx < 0 or rule_idx >= len(rules):
+            logging.warning("Rule index %d out of range", rule_idx)
+            return
+        rule = rules[rule_idx]
+        verdict_tokens = [v.strip() for v in rule.get(
+            "verdict", "").split(";") if v.strip()]
+        logging.info(
+            "Rule '%s' matched %d messages; verdict=%s",
+            rule.get("from_matcher"), len(matched_ids), verdict_tokens
+        )
+        apply_verdicts(gmail_service, matched_ids, verdict_tokens)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(apply_for_rule, item)
+                   for item in rule_to_matched_ids.items()]
+        for fut in futures:
+            fut.result()  # Propagate exceptions if any
+
 # === Main =====================================================================
 
 
@@ -351,25 +485,17 @@ def main() -> None:
     recent_messages = get_recent_message_ids(
         gmail_service, lookback_minutes=LOOKBACK_MINUTES, cap=MAX_MESSAGES_FETCH)
 
-    # For each rule, collect matched message IDs and apply verdicts
-    # We'll do per-rule application (could be merged for performance)
-    for rule in rules:
-        matched_ids: List[str] = []
-        for msg in recent_messages:
-            try:
-                if message_matches_rule(msg, rule):
-                    matched_ids.append(msg["id"])
-            except Exception:
-                logging.exception(
-                    "Error checking message against rule %s", rule.get("name"))
-        if matched_ids:
-            verdict_tokens = [v.strip() for v in rule.get(
-                "verdict", "").split(";") if v.strip()]
-            logging.info("Rule '%s' matched %d messages; verdict=%s",
-                         rule.get("name"), len(matched_ids), verdict_tokens)
-            apply_verdicts(gmail_service, matched_ids, verdict_tokens)
-        else:
-            logging.debug("Rule '%s' matched 0 messages", rule.get("name"))
+    # Build rule -> matched ids mapping in parallel for speed
+    workers = compute_ideal_num_workers(len(recent_messages))
+    logging.info("Num workers: %d", workers)
+    rule_to_matched_ids = compute_rule_to_matched_ids(
+        recent_messages, rules, workers
+    )
+
+    # Apply verdicts for each rule in parallel
+    workers = compute_ideal_num_workers(len(rules))
+    apply_verdicts_in_parallel(
+        gmail_service, rules, rule_to_matched_ids, workers)
 
 
 if __name__ == "__main__":
