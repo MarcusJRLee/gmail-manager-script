@@ -24,3 +24,16 @@ Deactivate when done:
 ### Run Tests
 
 `python3 -m pytest -q`
+
+### Private Config
+
+Create a `config.private.json` file (ignored by git) with your sheet settings:
+
+```json
+{
+  "SPREADSHEET_ID": "YOUR_SHEET_ID_HERE",
+  "SHEET_NAME": "Rules"
+}
+```
+
+Alternatively, set environment variables `SPREADSHEET_ID` and/or `SHEET_NAME`. Precedence for each is: env var, then `config.private.json`, then built-in default.

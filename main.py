@@ -20,27 +20,29 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 
-# === Configuration ===
+# === Configuration ============================================================
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
-# Edit these
-# <-- put the ID for your Google Sheet
-SPREADSHEET_ID: str = "PUT_YOUR_SPREADSHEET_ID_HERE"
-SHEET_NAME: str = "Sheet1"  # sheet/tab name
+# Edit these (non-secret defaults). Put secrets in config.private.json
+DEFAULT_SPREADSHEET_ID: str = "SHEET_ID"
+DEFAULT_SHEET_NAME: str = "SHEET_NAME"
 LOOKBACK_MINUTES: int = 60
 MAX_MESSAGES_FETCH: int = 500  # safety cap
 CREDENTIALS_FILE: str = "credentials.json"
 TOKEN_FILE: str = "token.json"
+CONFIG_FILE: str = "config.private.json"
 
 # Logging
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 
 
-# === Authentication / service creation ===
+# === Authentication / service creation ========================================
+
 def get_creds() -> Credentials:
     creds: Optional[Credentials] = None
     if os.path.exists(TOKEN_FILE):
@@ -58,7 +60,43 @@ def get_creds() -> Credentials:
     return creds
 
 
-# === Sheets ===
+# === Sheets ===================================================================
+
+def _load_private_config() -> Dict[str, Any]:
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        logging.warning("Failed to parse %s; ignoring.", CONFIG_FILE)
+        return {}
+
+
+def get_spreadsheet_id() -> str:
+    # Precedence: env var -> private config -> default constant
+    env_v = os.getenv("SPREADSHEET_ID")
+    if env_v:
+        return env_v
+    cfg = _load_private_config()
+    v = cfg.get("SPREADSHEET_ID")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return DEFAULT_SPREADSHEET_ID
+
+
+def get_sheet_name() -> str:
+    # Precedence: env var -> private config -> default constant
+    env_v = os.getenv("SHEET_NAME")
+    if env_v:
+        return env_v
+    cfg = _load_private_config()
+    v = cfg.get("SHEET_NAME")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return DEFAULT_SHEET_NAME
+
+
 class Rule(TypedDict, total=False):
     name: str
     from_matcher: str
@@ -71,16 +109,30 @@ class Rule(TypedDict, total=False):
 
 def read_rules_from_sheet(sheets_service: Any) -> List[Rule]:
     # We expect header row; read all values
-    range_name = f"{SHEET_NAME}"
+    sheet_name = get_sheet_name()
+    sheet_id = get_spreadsheet_id()
+    logging.info(
+        "Opening sheet_name: '%s' in sheet (id: '%s')", sheet_name, sheet_id)
     sheet = sheets_service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_name).execute()
+    result = sheet.values().get(spreadsheetId=get_spreadsheet_id(),
+                                range=sheet_name).execute()
     values = result.get("values", [])
     if not values or len(values) < 1:
         logging.warning("No data in sheet.")
         return []
 
-    headers = [h.strip() for h in values[0]]
-    rows = values[1:]
+    # Find the header row by looking for a row with "enabled" as the first column value (case-insensitive)
+    header_row_index = None
+    for idx, row in enumerate(values):
+        if row and str(row[0]).strip().lower() == "enabled":
+            header_row_index = idx
+            break
+    if header_row_index is None:
+        logging.warning("No header row found with 'enabled' as first column.")
+        return []
+    headers = [h.strip() for h in values[header_row_index]]
+
+    rows = values[header_row_index:]
     rules: List[Rule] = []
     for row in rows:
         # Map header -> value (safe access)
@@ -106,7 +158,8 @@ def read_rules_from_sheet(sheets_service: Any) -> List[Rule]:
     return rules
 
 
-# === Gmail helpers ===
+# === Gmail helpers ============================================================
+
 def build_gmail_service(creds: Credentials):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
@@ -280,6 +333,8 @@ def apply_verdicts(gmail_service: Any, message_ids: List[str], verdicts: List[st
                 ids_chunk), add_label_ids, remove_label_ids)
         except HttpError as e:
             logging.exception("Error applying verdict to messages: %s", e)
+
+# === Main =====================================================================
 
 
 def main() -> None:

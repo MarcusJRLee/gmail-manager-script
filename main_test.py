@@ -49,10 +49,10 @@ def test_message_matches_rule():
 
     rule: m.Rule = {
         "name": "r1",
-        "from_contains": "boss@",
-        "to_contains": "me@",
-        "subject_contains": "update",
-        "body_contains": "hello",
+        "from_matcher": "boss@",
+        "to_matcher": "me@",
+        "subject_matcher": "update",
+        "body_matcher": "hello",
         "has_attachment": False,
         "verdict": "mark_read",
     }
@@ -94,8 +94,8 @@ def test_read_rules_from_sheet(monkeypatch: pytest.MonkeyPatch):
 
     data = {
         "values": [
-            ["enabled", "name", "from_contains", "to_contains",
-                "subject_contains", "body_contains", "has_attachment", "verdict"],
+            ["enabled", "name", "from_matcher", "to_matcher",
+                "subject_matcher", "body_matcher", "has_attachment", "verdict"],
             ["true", "rule1", "boss@", "me@", "update",
                 "hello", "false", "mark_read"],
             ["false", "rule2", "x", "y", "z", "b", "true", "add_label:Test"],
@@ -107,8 +107,45 @@ def test_read_rules_from_sheet(monkeypatch: pytest.MonkeyPatch):
     assert len(rules) == 1
     r = rules[0]
     assert r["name"] == "rule1"
-    assert r["from_contains"] == "boss@"
+    assert r["from_matcher"] == "boss@"
     assert r["has_attachment"] is False
+
+
+def test_get_spreadsheet_id_env_then_config_then_default(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+    # Point config file to temp
+    cfg_path = tmp_path / "config.private.json"
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    # 1) Env var wins
+    monkeypatch.setenv("SPREADSHEET_ID", "ENV_ID")
+    assert m.get_spreadsheet_id() == "ENV_ID"
+
+    # 2) Config when no env
+    monkeypatch.delenv("SPREADSHEET_ID", raising=False)
+    cfg_path.write_text(json.dumps({"SPREADSHEET_ID": "CFG_ID"}))
+    assert m.get_spreadsheet_id() == "CFG_ID"
+
+    # 3) Default when missing/bad
+    cfg_path.write_text("not json")
+    assert m.get_spreadsheet_id() == m.DEFAULT_SPREADSHEET_ID
+
+
+def test_get_sheet_name_env_then_config_then_default(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+    cfg_path = tmp_path / "config.private.json"
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    # Env wins
+    monkeypatch.setenv("SHEET_NAME", "EnvRules")
+    assert m.get_sheet_name() == "EnvRules"
+
+    # Config when no env
+    monkeypatch.delenv("SHEET_NAME", raising=False)
+    cfg_path.write_text(json.dumps({"SHEET_NAME": "CfgRules"}))
+    assert m.get_sheet_name() == "CfgRules"
+
+    # Default when bad/missing
+    cfg_path.write_text("not json")
+    assert m.get_sheet_name() == m.DEFAULT_SHEET_NAME
 
 
 def test_build_gmail_service(monkeypatch: pytest.MonkeyPatch):
