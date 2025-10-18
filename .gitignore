@@ -3,3 +3,4 @@ token.json
 __pycache__/
 *.pyc
 config.private.json
+logs/

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.marcus.gmail_manager</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/run_manager.sh</string>
+    </array>
+
+    <!-- Log files. -->
+    <key>StandardOutPath</key>
+    <string>/Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/output.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/error.log</string>
+
+    <!-- Run as soon as its loaded. -->
+    <key>RunAtLoad</key>
+    <true />
+
+    <!-- Then run every 3 minutes. -->
+    <key>StartInterval</key>
+    <integer>180</integer>
+
+    <!-- Keep it alive if it fails. -->
+    <key>KeepAlive</key>
+    <false />
+  </dict>
+</plist>

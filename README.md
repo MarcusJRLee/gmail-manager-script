@@ -4,6 +4,24 @@ This script runs periodically (e.g. every 20 minutes) to manage your incoming em
 
 ## Setup instructions
 
+```bash
+cp ./com.marcus.email_manager.plist ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+launchctl list | grep marcus
+
+launchctl unload ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+plutil -lint ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+sudo nano /etc/newsyslog.conf
+```
+
 ### Install requirements
 
 MacOS:
