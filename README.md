@@ -11,15 +11,33 @@ launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
-
-launchctl list | grep marcus
-
-launchctl unload ~/Library/LaunchAgents/com.marcus.email_manager.plist
-
+# Lint check the plist file.
 plutil -lint ~/Library/LaunchAgents/com.marcus.email_manager.plist
 
+# Load the plist file once it is ready.
+launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+# Confirm that the plist file is loaded and automation is running.
+launchctl list | grep marcus
+
+# Unload the plist file if you need to update it.
+launchctl unload ~/Library/LaunchAgents/com.marcus.email_manager.plist
+
+# Update your newslog config to make sure your logs don't go on forever by
+# running the following commadn and adding the following:
 sudo nano /etc/newsyslog.conf
+
+# Rotate output.log when it reaches 5KB or after 7 days (168 hours) with 2 archived versions.
+/Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/output.log    mjrlee:staff 644 2 5 168
+
+# Rotate error.log when it reaches 5KB or after 7 days (168 hours) with 2 archived versions.
+/Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/error.log     mjrlee:staff 644 2 5 168
+
+# newsyslog dry run:
+sudo newsyslog -n -f /etc/newsyslog.conf
+
+# Check newslog logs:
+tail -f /var/log/system.log | grep newsyslog
 ```
 
 ### Install requirements
