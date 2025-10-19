@@ -5,14 +5,11 @@ This script runs periodically (e.g. every 20 minutes) to manage your incoming em
 ## Setup instructions
 
 ```bash
-cp ./com.marcus.email_manager.plist ~/Library/LaunchAgents/com.marcus.email_manager.plist
-
-launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
-```
-
-```bash
 # Lint check the plist file.
-plutil -lint ~/Library/LaunchAgents/com.marcus.email_manager.plist
+plutil -lint ./com.marcus.email_manager.plist
+
+# Copy the plist file from this dir into the Mac agents dir.
+cp ./com.marcus.email_manager.plist ~/Library/LaunchAgents/com.marcus.email_manager.plist
 
 # Load the plist file once it is ready.
 launchctl load ~/Library/LaunchAgents/com.marcus.email_manager.plist
