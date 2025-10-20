@@ -33,8 +33,10 @@ sudo nano /etc/newsyslog.conf
 # newsyslog dry run:
 sudo newsyslog -n -f /etc/newsyslog.conf
 
-# Check newslog logs:
-tail -f /var/log/system.log | grep newsyslog
+# Test the newsyslog configuration:
+sudo newsyslog -nv /Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/output.log
+sudo newsyslog -nv /Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/error.log
+sudo newsyslog -nv
 ```
 
 ### Install requirements
