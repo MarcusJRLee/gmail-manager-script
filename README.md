@@ -30,6 +30,9 @@ sudo nano /etc/newsyslog.conf
 # Rotate error.log when it reaches 5KB or after 7 days (168 hours) with 2 archived versions.
 /Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/error.log     mjrlee:staff 644 2 5 168
 
+# Then check in Cursor with the following command:
+open -a "Cursor" /etc/newsyslog.conf
+
 # newsyslog dry run:
 sudo newsyslog -n -f /etc/newsyslog.conf
 
@@ -37,6 +40,9 @@ sudo newsyslog -n -f /etc/newsyslog.conf
 sudo newsyslog -nv /Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/output.log
 sudo newsyslog -nv /Users/mjrlee/Documents/MyFiles/CodingDirectories/gmail-manager-script/logs/error.log
 sudo newsyslog -nv
+
+# Run newsyslog in verbose mode:
+sudo newsyslog -v
 ```
 
 ### Install requirements
