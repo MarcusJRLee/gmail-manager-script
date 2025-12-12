@@ -47,24 +47,35 @@ sudo newsyslog -v
 
 ### Install requirements
 
-MacOS:
-`source .venv/bin/activate`
+```bash
+# MacOS:
+source .venv/bin/activate
 
-Windows (Command Prompt):
-`.venv\Scripts\activate.bat`
+# Windows (Command Prompt):
+.venv\Scripts\activate.bat
 
-Windows (PowerShell):
-`.venv\Scripts\Activate.ps1`
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
 
-Install the requirements:
-`pip install -r requirements.txt`
+# Install the requirements:
+pip install -r requirements.txt
 
-Deactivate when done:
-`deactivate`
+# Deactivate when done:
+deactivate
+```
 
 ### Run Tests
 
-`python3 -m pytest -q`
+```bash
+# Run all tests.
+pytest
+
+# Run tests for specific file.
+pytest main_test.py
+
+# Run tests for specific dir.
+pytest tests/
+```
 
 ### Private Config
 

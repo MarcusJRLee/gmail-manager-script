@@ -281,6 +281,19 @@ def header_value(headers: Sequence[GmailHeader], name: str) -> str:
 
 def message_matches_rule(message: GmailMessage, rule: Rule) -> bool:
     """Check all non-empty fields of rule (AND semantics)."""
+    # Bug fix: If all matchers are empty, don't match anything. Without this
+    # check, empty rules would match every message (which can cause everything
+    # to be marked as read).
+    has_any_matcher = (
+        bool(rule.get("from_matcher", "").strip()) or
+        bool(rule.get("to_matcher", "").strip()) or
+        bool(rule.get("subject_matcher", "").strip()) or
+        bool(rule.get("body_matcher", "").strip()) or
+        rule.get("has_attachment", False)
+    )
+    if not has_any_matcher:
+        return False
+
     headers: List[GmailHeader] = message.get("payload", {}).get(
         "headers", [])  # type: ignore[assignment]
     from_v = header_value(headers, "From")

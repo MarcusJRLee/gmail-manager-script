@@ -61,6 +61,25 @@ def test_message_matches_rule():
     rule["has_attachment"] = True
     assert m.message_matches_rule(msg, rule) is False
 
+    # Test bug fix: empty matchers should not match everything.
+    empty_rule: m.Rule = {
+        "name": "empty",
+        "from_matcher": "",
+        "to_matcher": "",
+        "subject_matcher": "",
+        "body_matcher": "",
+        "has_attachment": False,
+        "verdict": "mark_read",
+    }
+    assert m.message_matches_rule(msg, empty_rule) is False
+
+    # Empty rule with has_attachment=False should still not match.
+    assert m.message_matches_rule(msg, empty_rule) is False
+
+    # Rule with at least one matcher should work.
+    empty_rule["from_matcher"] = "boss@"
+    assert m.message_matches_rule(msg, empty_rule) is True
+
 
 def test_read_rules_from_sheet(monkeypatch: pytest.MonkeyPatch):
     # Build a fake sheets service
